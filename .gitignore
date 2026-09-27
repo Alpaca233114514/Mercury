@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Mercury private local accounts and market evidence
+/data/
+/reports/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env.*
+!.env.example

@@ -1,0 +1,9 @@
+[project]
+name = "mercury-paper"
+version = "0.1.0"
+description = "Local agent paper trading with read-only Financial Datasets MCP evidence"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.mercury]
+execution = "paper-only"
