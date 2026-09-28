@@ -1,0 +1,339 @@
+{
+  "version": "cn-2026-07-06-v1",
+  "effective_from": "2026-07-06",
+  "effective_through": "2026-12-31",
+  "sources": [
+    "https://www.sse.com.cn/lawandrules/sselawsrules2025/stocks/exchange/c/c_20260424_10816482.shtml",
+    "https://www.szse.cn/www/lawrules/rule/stock/t20260424_620190.html",
+    "https://www.chinaclear.cn/zdjs/fbzyls/service_tlist/code_0.shtml",
+    "https://www.chinatax.gov.cn/n810341/n810765/n812203/n813164/c1209808/content.html",
+    "https://www.bse.cn/jygl_list/200028217.html"
+  ],
+  "assumptions": [
+    "Commission bps and minimum are explicit account terms; bundled minimum is 5 CNY",
+    "ETF transfer is secondary share trading only, not creation/redemption",
+    "No auction, temporary halt, price cage or order-book simulation; CN accepts limit orders only"
+  ],
+  "profiles": {
+    "SH_MAIN_STOCK": {
+      "exchange": "SH",
+      "security_type": "stock",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T1",
+      "ipo_unrestricted_sessions": 5,
+      "tick": "0.01",
+      "transfer_bps": "0.1",
+      "stamp_sell_bps": "5",
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SZ_MAIN_STOCK": {
+      "exchange": "SZ",
+      "security_type": "stock",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T1",
+      "ipo_unrestricted_sessions": 5,
+      "tick": "0.01",
+      "transfer_bps": "0.1",
+      "stamp_sell_bps": "5",
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SH_STAR_STOCK": {
+      "exchange": "SH",
+      "security_type": "stock",
+      "min_qty": 200,
+      "qty_step": 1,
+      "max_limit_qty": 100000,
+      "limit_percent": "20",
+      "risk_limit_percent": "20",
+      "settlement": "T1",
+      "ipo_unrestricted_sessions": 5,
+      "tick": "0.01",
+      "transfer_bps": "0.1",
+      "stamp_sell_bps": "5",
+      "sell_min_qty": 200,
+      "sell_qty_step": 1
+    },
+    "SZ_GEM_STOCK": {
+      "exchange": "SZ",
+      "security_type": "stock",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 300000,
+      "limit_percent": "20",
+      "risk_limit_percent": "20",
+      "settlement": "T1",
+      "ipo_unrestricted_sessions": 5,
+      "tick": "0.01",
+      "transfer_bps": "0.1",
+      "stamp_sell_bps": "5",
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SH_EQUITY_ETF": {
+      "exchange": "SH",
+      "security_type": "equity_etf",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T1",
+      "ipo_unrestricted_sessions": 0,
+      "tick": "0.001",
+      "transfer_bps": "0",
+      "stamp_sell_bps": "0",
+      "allowed_limit_percent": [
+        "10",
+        "20"
+      ],
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SH_BOND_ETF": {
+      "exchange": "SH",
+      "security_type": "bond_etf",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T0",
+      "ipo_unrestricted_sessions": 0,
+      "tick": "0.001",
+      "transfer_bps": "0",
+      "stamp_sell_bps": "0",
+      "allowed_limit_percent": [
+        "10",
+        "20"
+      ],
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SH_MONEY_ETF": {
+      "exchange": "SH",
+      "security_type": "money_etf",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T0",
+      "ipo_unrestricted_sessions": 0,
+      "tick": "0.001",
+      "transfer_bps": "0",
+      "stamp_sell_bps": "0",
+      "allowed_limit_percent": [
+        "10",
+        "20"
+      ],
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SH_GOLD_ETF": {
+      "exchange": "SH",
+      "security_type": "gold_etf",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T0",
+      "ipo_unrestricted_sessions": 0,
+      "tick": "0.001",
+      "transfer_bps": "0",
+      "stamp_sell_bps": "0",
+      "allowed_limit_percent": [
+        "10",
+        "20"
+      ],
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SH_COMMODITY_ETF": {
+      "exchange": "SH",
+      "security_type": "commodity_etf",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T0",
+      "ipo_unrestricted_sessions": 0,
+      "tick": "0.001",
+      "transfer_bps": "0",
+      "stamp_sell_bps": "0",
+      "allowed_limit_percent": [
+        "10",
+        "20"
+      ],
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SH_CROSSBORDER_VERIFIED_T0_ETF": {
+      "exchange": "SH",
+      "security_type": "crossborder_verified_t0_etf",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T0",
+      "ipo_unrestricted_sessions": 0,
+      "tick": "0.001",
+      "transfer_bps": "0",
+      "stamp_sell_bps": "0",
+      "allowed_limit_percent": [
+        "10",
+        "20"
+      ],
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SZ_EQUITY_ETF": {
+      "exchange": "SZ",
+      "security_type": "equity_etf",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T1",
+      "ipo_unrestricted_sessions": 0,
+      "tick": "0.001",
+      "transfer_bps": "0",
+      "stamp_sell_bps": "0",
+      "allowed_limit_percent": [
+        "10",
+        "20"
+      ],
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SZ_BOND_ETF": {
+      "exchange": "SZ",
+      "security_type": "bond_etf",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T0",
+      "ipo_unrestricted_sessions": 0,
+      "tick": "0.001",
+      "transfer_bps": "0",
+      "stamp_sell_bps": "0",
+      "allowed_limit_percent": [
+        "10",
+        "20"
+      ],
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SZ_MONEY_ETF": {
+      "exchange": "SZ",
+      "security_type": "money_etf",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T0",
+      "ipo_unrestricted_sessions": 0,
+      "tick": "0.001",
+      "transfer_bps": "0",
+      "stamp_sell_bps": "0",
+      "allowed_limit_percent": [
+        "10",
+        "20"
+      ],
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SZ_GOLD_ETF": {
+      "exchange": "SZ",
+      "security_type": "gold_etf",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T0",
+      "ipo_unrestricted_sessions": 0,
+      "tick": "0.001",
+      "transfer_bps": "0",
+      "stamp_sell_bps": "0",
+      "allowed_limit_percent": [
+        "10",
+        "20"
+      ],
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SZ_COMMODITY_ETF": {
+      "exchange": "SZ",
+      "security_type": "commodity_etf",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T0",
+      "ipo_unrestricted_sessions": 0,
+      "tick": "0.001",
+      "transfer_bps": "0",
+      "stamp_sell_bps": "0",
+      "allowed_limit_percent": [
+        "10",
+        "20"
+      ],
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "SZ_CROSSBORDER_VERIFIED_T0_ETF": {
+      "exchange": "SZ",
+      "security_type": "crossborder_verified_t0_etf",
+      "min_qty": 100,
+      "qty_step": 100,
+      "max_limit_qty": 1000000,
+      "limit_percent": "10",
+      "risk_limit_percent": "10",
+      "settlement": "T0",
+      "ipo_unrestricted_sessions": 0,
+      "tick": "0.001",
+      "transfer_bps": "0",
+      "stamp_sell_bps": "0",
+      "allowed_limit_percent": [
+        "10",
+        "20"
+      ],
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    },
+    "BJ_STOCK": {
+      "exchange": "BJ",
+      "security_type": "stock",
+      "min_qty": 100,
+      "qty_step": 1,
+      "max_limit_qty": 1000000,
+      "limit_percent": "30",
+      "risk_limit_percent": "30",
+      "settlement": "T1",
+      "ipo_unrestricted_sessions": 1,
+      "tick": "0.01",
+      "transfer_bps": "0.1",
+      "stamp_sell_bps": "5",
+      "sell_min_qty": 100,
+      "sell_qty_step": 1
+    }
+  }
+}
