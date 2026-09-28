@@ -155,6 +155,9 @@ def check(trader, db, *, order, price, qty, fee, phase, at=None):
     evidence = {"phase": phase, "policy_hash": digest(policy), "order": dict(order),
                 "price": str(price), "qty": qty, "fee": str(fee), "time": now,
                 "loss_action": "block_buys_allow_sells", "errors": []}
+    evidence["policy"] = policy
+    evidence["calculations"] = {}
+    evidence["checks_status"] = "not_executed"
     errors = evidence["errors"]
     if portfolio["equity"] is None:
         errors.append("risk valuation missing/stale")
@@ -228,15 +231,25 @@ def check(trader, db, *, order, price, qty, fee, phase, at=None):
     projected_equity = equity - pending_fees - adverse
     evidence.update(notional=str(notional), turnover=str(turnover), committed_turnover=str(pending_turnover),
                     projected_equity=str(projected_equity), exposure={k: str(v) for k, v in exposure.items()})
+    evidence["calculations"].update(pending_fees=str(pending_fees), adverse_price_cost=str(adverse),
+        single_order={"actual":str(notional+fee), "maximum":policy["max_order_notional"]},
+        daily_turnover={"actual":str(turnover+pending_turnover), "maximum":str(base*number(policy["max_daily_turnover"]))},
+        position_exposure={"actual": {k:str(v) for k,v in exposure.items()},
+                           "maximum":str(projected_equity*number(policy["max_position_weight"]))},
+        daily_loss={"projected_equity":str(projected_equity), "minimum_equity":str(base*(1-number(policy["max_daily_loss"])))},
+        estimated_orders={str(k):{"amount":str(v[0]), "fee":str(v[1])} for k,v in estimated_by_order.items()})
     if notional + fee > number(policy["max_order_notional"]):
         errors.append("single order CNY amount including fees exceeds policy")
     committed_amount, committed_fee = estimated_by_order.get(order.get("id"), (notional, fee))
     prior_paid = sum((number(f["notional"]) + number(f["fee"]) for f in db.execute("SELECT * FROM fills WHERE order_id=?", (order.get("id", ""),))), Decimal(0))
+    evidence["calculations"]["original_order"] = {"prior_paid":str(prior_paid), "committed_amount":str(committed_amount),
+        "committed_fee":str(committed_fee), "actual":str(prior_paid+committed_amount+committed_fee), "maximum":policy["max_order_notional"]}
     if prior_paid + committed_amount + committed_fee > number(policy["max_order_notional"]):
         errors.append("original order including remaining commitment exceeds CNY cap")
     # Original-order total cap remains enforced after partial executions.
     if phase == "fill":
         paid = sum((number(f["notional"]) + number(f["fee"]) for f in db.execute("SELECT * FROM fills WHERE order_id=?", (order["id"],))), Decimal(0))
+        evidence["calculations"]["cumulative_order"] = {"actual":str(paid+notional+fee), "maximum":policy["max_order_notional"]}
         if paid + notional + fee > number(policy["max_order_notional"]):
             errors.append("cumulative order CNY amount including fees exceeds policy")
     if turnover + pending_turnover > base * number(policy["max_daily_turnover"]):
@@ -248,4 +261,6 @@ def check(trader, db, *, order, price, qty, fee, phase, at=None):
             errors.append("single security weight including open buys exceeds policy")
         if projected_equity < base * (1 - number(policy["max_daily_loss"])):
             errors.append("daily loss limit blocks new buys")
+    evidence["checks_status"] = "rejected" if errors else "passed"
+    evidence["buy_only_checks"] = "executed" if order["side"] == "buy" else "not_applicable"
     return evidence

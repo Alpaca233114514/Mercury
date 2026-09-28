@@ -53,6 +53,8 @@ def phase(folder, name, operation):
     try:
         return operation()
     except Exception as exc:
+        from .records import failure
+        failure(name, exc)
         # Fixed diagnostic only: provider/model text never reaches persisted failures.
         artifact(pathlib.Path(folder)/("failure-"+name+"-"+uuid.uuid4().hex+".json"),
                  {"phase": name, "status": "failed", "error_type": type(exc).__name__,
@@ -176,6 +178,25 @@ def public_account(trader, observation):
 
 
 def run_cycle(trader, agent, observation, *, output, feedback=None):
+    from .records import cycle_context, enabled
+    from .observation import validate_observation
+    observation = validate_observation(observation)
+    binding = {"version": "cn-cycle-v1", "observation_id": observation["observation_id"],
+               "observation_sha256": digest(observation), "agent": agent.identity,
+               "previous_review_sha256": digest(public_feedback(feedback)),
+               "account_identity": digest(str(pathlib.Path(trader.path).resolve()))}
+    # Historical receipts remain readable without pretending old computations were recorded.
+    with trader._read() as db:
+        recording = enabled(db)
+        existing_cycle = db.execute("SELECT 1 FROM record_cycles WHERE cycle_id=?", (digest(binding),)).fetchone() if recording else None
+    if not existing_cycle and (pathlib.Path(output)/"receipt.json").exists():
+        return _run_cycle(trader, agent, observation, output=output, feedback=feedback)
+    with cycle_context(trader, binding, observation, output):
+        return _run_cycle(trader, agent, observation, output=output, feedback=feedback)
+
+
+def _run_cycle(trader, agent, observation, *, output, feedback=None):
+    from .records import stage
     from .observation import validate_observation
     from .strategy import validate_research, validate_strategy, compile_intents, validate_intent
     observation = validate_observation(observation)
@@ -202,22 +223,57 @@ def run_cycle(trader, agent, observation, *, output, feedback=None):
                 raise ValueError("historical cycle receipt does not match its ledger intent")
             # Later legitimate ledger evolution is allowed; damaged current state is not.
             phase(folder, "audit", lambda:checked_audit(trader))
+            for name in ("account", "model-output", "intent", "risk"):
+                stage(name, read_artifact(folder/(name+".json")))
+            if (folder/"calculations.json").exists():
+                stage("calculations", read_artifact(folder/"calculations.json"))
+            stage("receipt", receipt)
             return receipt
         artifact(folder / "observation.json", observation)
         account_path = folder / "account.json"
         account = read_artifact(account_path) if account_path.exists() else artifact(account_path, public_account(trader, observation))
+        stage("account", account)
         # Feedback is from prior local receipts only; arbitrary documents are not sent.
         artifact(folder / "previous-review.json", feedback)
+        stage("previous-review", feedback)
         model_path = folder / "model-output.json"
         model_account = {k:v for k,v in account.items() if k != "ledger_state_sha256"}
+        stage("model-input", {"observation_sha256":digest(observation), "account_sha256":digest(model_account),
+                              "feedback_sha256":digest(feedback),
+                              "input_sha256":digest({"observation":observation,"account":model_account,"feedback":feedback})})
         decision = read_artifact(model_path) if model_path.exists() else phase(folder, "model", lambda:agent.decide(observation, model_account, feedback))
         if not isinstance(decision, dict) or set(decision) != {"research", "strategy"}:
             raise ValueError("agent output must contain only research and strategy")
         research = phase(folder, "research-validation", lambda:validate_research(decision["research"], observation))
         strategy = phase(folder, "strategy-validation", lambda:validate_strategy(decision["strategy"], observation, research))
         artifact(model_path, {"research": research, "strategy": strategy})
-        intent = phase(folder, "intent", lambda:validate_intent(compile_intents(strategy, observation, account), observation, strategy))
+        stage("model-output", {"research": research, "strategy": strategy})
+        calculation_path = folder / "calculations.json"
+        if calculation_path.exists():
+            calculation = read_artifact(calculation_path)
+            if calculation["strategy_id"] != strategy["strategy_id"] or calculation["account_sha256"] != digest(account):
+                raise ValueError("calculation input binding mismatch")
+            intent = validate_intent(calculation["intent"], observation, strategy)
+        else:
+            if (folder/"intent.json").exists():
+                intent = validate_intent(read_artifact(folder/"intent.json"), observation, strategy)
+                calculation = {"version":"mercury-calculation-v1", "status":"not_recorded",
+                               "reason":"historical intent exists without calculation trace",
+                               "strategy_id":strategy["strategy_id"], "account_sha256":digest(account)}
+            else:
+                calculation = {}
+                try:
+                    intent = phase(folder, "intent", lambda:validate_intent(compile_intents(strategy, observation, account, trace=calculation), observation, strategy))
+                except Exception:
+                    artifact(folder/("calculation-failure-"+uuid.uuid4().hex+".json"), calculation)
+                    from .records import partial_calculation
+                    partial_calculation(calculation)
+                    raise
+            calculation["intent"] = intent
+            artifact(calculation_path, calculation)
+        stage("calculations", calculation)
         artifact(folder / "intent.json", intent)
+        stage("intent", intent)
         risk_path = folder / "risk.json"
         if not risk_path.exists():
             existing = trader.intent_result(intent["intent_id"])
@@ -227,6 +283,7 @@ def run_cycle(trader, agent, observation, *, output, feedback=None):
             risk = read_artifact(risk_path)
             if trader.intent_result(intent["intent_id"]) != risk:
                 raise ValueError("saved risk receipt differs from ledger intent")
+        stage("risk", risk)
         matched = phase(folder, "match", trader.match)
         portfolio = phase(folder, "valuation", lambda:trader.portfolio(record=True))
         from .analytics import performance
@@ -248,6 +305,7 @@ def run_cycle(trader, agent, observation, *, output, feedback=None):
                    "limitations": ["bounded local paper cycle, not exchange execution",
                                    "remote model is data-only; host administrator remains trusted"]}
         artifact(folder / "receipt.json", receipt)
+        stage("receipt", receipt)
         return receipt
 
 

@@ -165,7 +165,7 @@ def validate_intent(intent, observation, strategy=None):
     return json.loads(canonical(intent))
 
 
-def _score(rows, signals):
+def _score(rows, signals, trace=None):
     if len({r["frequency"] for r in rows}) != 1 or rows[0]["frequency"] == "unknown":
         raise ValueError("signal input frequency mixed or unverified")
     prices = [decimal(r["price"], positive=True) for r in rows]
@@ -185,10 +185,16 @@ def _score(rows, signals):
             mean = sum(returns) / len(returns)
             value = -(sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)).sqrt()
         score += value * decimal(signal["weight"], positive=True)
+        if trace is not None:
+            trace.append({"name": signal["name"], "window": window, "weight": signal["weight"],
+                          "quote_ids": [r["quote_id"] for r in rows[-need:]],
+                          "prices": [str(p) for p in tail], "value": str(value),
+                          "weighted_value": str(value * decimal(signal["weight"], positive=True)),
+                          "running_score": str(score)})
     return score
 
 
-def compile_intents(strategy, observation, account_snapshot):
+def compile_intents(strategy, observation, account_snapshot, *, trace=None):
     """Compile target allocation into explicit lot-valid limits; hard risk owns approval.
 
     Existing positions require holding_sessions from the controlled runner. Orders
@@ -197,6 +203,11 @@ def compile_intents(strategy, observation, account_snapshot):
     """
     obs = validate_observation(observation)
     strategy = validate_strategy(strategy, obs)
+    if trace is not None:
+        from .records import code_identity
+        trace.update(version="mercury-calculation-v1", observation_id=obs["observation_id"],
+                     strategy_id=strategy["strategy_id"], account_sha256=digest(account_snapshot),
+                     code=code_identity(), signals=[], ranking=[], targets=[], status="started")
     portfolio = account_snapshot
     if not isinstance(portfolio, dict) or portfolio.get("currency") != "CNY" or portfolio.get("missing_marks") or portfolio.get("equity") is None:
         raise ValueError("compiler requires CNY portfolio with complete valuation")
@@ -231,6 +242,9 @@ def compile_intents(strategy, observation, account_snapshot):
     anchor = calendar["trading_days"].index(strategy["rebalance"]["anchor_day"])
     expired_hold = any(p.get("holding_sessions", 0) >= strategy["holding"]["max_sessions"] for p in positions.values())
     due = calendar["is_open"] and (expired_hold or (len(calendar["trading_days"]) - 1 - anchor) % strategy["rebalance"]["every_sessions"] == 0)
+    if trace is not None:
+        trace.update(equity=str(equity), rebalance={"market_open": calendar["is_open"],
+                     "expired_hold": expired_hold, "due": due, "pending_orders": len(pending)})
     if pending:
         reason += "; hold: outstanding order remainder; cancel or finish it before rebalancing"
     elif not due:
@@ -243,13 +257,22 @@ def compile_intents(strategy, observation, account_snapshot):
                     obs["status"][ticker]["suspended"] or
                     age_seconds(obs["as_of"], rows[-1]["asof"]) > strategy["invalidation"]["max_quote_age_seconds"]):
                 raise ValueError("strategy instrument has missing/stale/untradable frozen data")
-            scored.append((_score(rows, strategy["signals"]), ticker))
+            details = [] if trace is not None else None
+            if trace is not None:
+                trace["signals"].append({"symbol": ticker, "values": details})
+            scored.append((_score(rows, strategy["signals"], details), ticker))
         scored.sort(key=lambda item: (-item[0], item[1]))
         # Expired holdings leave the ranking before top_k; never immediately rebuy.
         selected = [ticker for score, ticker in scored if score >= decimal(strategy["invalidation"]["min_signal"]) and
                     positions.get(ticker, {}).get("holding_sessions", 0) < strategy["holding"]["max_sessions"]][:strategy["top_k"]]
         gross = decimal(strategy["allocation"]["gross_weight"])
         weight = gross / len(selected) if selected else Decimal(0)
+        if trace is not None:
+            trace["ranking"] = [{"symbol": ticker, "score": str(score), "rank": i+1,
+                "selected": ticker in selected, "reason": "selected" if ticker in selected else
+                "below_min_signal" if score < decimal(strategy["invalidation"]["min_signal"]) else
+                "holding_expired" if positions.get(ticker, {}).get("holding_sessions", 0) >= strategy["holding"]["max_sessions"] else "outside_top_k"}
+                for i, (score, ticker) in enumerate(scored)]
         for ticker in sorted(set(strategy["universe"]) | set(positions)):
             rows = obs["series"][ticker]
             if not rows:
@@ -260,16 +283,27 @@ def compile_intents(strategy, observation, account_snapshot):
                 raise ValueError("position target requires verified lot profile")
             target_weight = weight if ticker in selected else Decimal(0)
             target = int((equity * target_weight / price).to_integral_value(rounding=ROUND_FLOOR))
+            unrounded_target = str(equity * target_weight / price)
+            floored_target = target
             minimum, step = lot["min_qty"], lot["qty_step"]
             target = 0 if target < minimum else minimum + ((target - minimum) // step) * step
             current = positions.get(ticker, {}).get("qty", 0)
             difference = target - current
+            detail = {"symbol": ticker, "equity": str(equity), "target_weight": str(target_weight),
+                      "quote_id": rows[-1]["quote_id"], "reference_price": str(price),
+                      "unrounded_target": unrounded_target, "floored_target": floored_target,
+                      "lot": lot, "rounded_target": target, "current_qty": current,
+                      "difference": difference, "available_to_sell": positions.get(ticker, {}).get("available_to_sell"),
+                      "status": "target_unchanged" if not difference else "started"}
+            if trace is not None:
+                trace["targets"].append(detail)
             if not difference:
                 continue
             side = "buy" if difference > 0 else "sell"
             qty = abs(difference)
             if side == "buy":
                 if qty < minimum:
+                    detail["status"] = "below_minimum_lot"
                     continue  # Explicit lot rounding, not risk-limit clipping.
                 qty = minimum + ((qty - minimum) // step) * step
             else:
@@ -280,13 +314,18 @@ def compile_intents(strategy, observation, account_snapshot):
                 if not regular and qty != available:
                     raise ValueError("rebalance sell quantity requires unsupported partial odd lot")
             orders.append({"symbol": ticker, "side": side, "qty": qty, "limit_price": str(price), "target_weight": str(target_weight)})
+            detail.update(status="intent", side=side, qty=qty, limit_price=str(price))
         orders.sort(key=lambda o: (o["side"] == "buy", o["symbol"]))
         if not orders:
             reason += "; hold: target unchanged or below verified minimum lot"
     body = {"version": INTENT_VERSION, "as_of": obs["as_of"], "observation_id": obs["observation_id"],
             "strategy_id": strategy["strategy_id"], "reason": reason, "holding": strategy["holding"],
             "invalidation": strategy["invalidation"], "orders": orders, "evidence_ids": strategy["evidence_ids"]}
-    return validate_intent(_seal(body, "intent_id"), obs, strategy)
+    result = validate_intent(_seal(body, "intent_id"), obs, strategy)
+    if trace is not None:
+        trace.update(status="completed", intent_id=result["intent_id"], reason=reason,
+                     signals_status="executed" if trace["signals"] else "not_executed")
+    return result
 
 
 compile_intent = compile_intents

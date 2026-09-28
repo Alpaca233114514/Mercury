@@ -204,17 +204,28 @@ class CNMarket:
         rounding = ROUND_CEILING if direction > 0 else ROUND_FLOOR if direction < 0 else ROUND_HALF_UP
         return (value / tick).quantize(Decimal(1), rounding=rounding) * tick
 
-    def price(self, db, ticker, base, slip_bps, side):
+    def price(self, db, ticker, base, slip_bps, side, *, trace=None):
         p = self.profile(self.instrument(db, ticker))
         direction = 1 if side == "buy" else -1
+        if trace is not None:
+            trace.update(tick=p["tick"], rounding="ROUND_CEILING" if direction > 0 else "ROUND_FLOOR")
         return self.round_tick(number(base) * (1 + direction * number(slip_bps) / 10000), p["tick"], direction)
 
-    def charges(self, db, ticker, amount, side):
+    def charges(self, db, ticker, amount, side, *, trace=None):
         p = self.profile(self.instrument(db, ticker))
         cents = lambda value: value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         commission = cents(max(number(self.config["minimum_commission"]), amount * number(self.config["commission_bps"]) / 10000))
         transfer = cents(amount * number(p["transfer_bps"]) / 10000)
         stamp = cents(amount * number(p["stamp_sell_bps"]) / 10000) if side == "sell" else Decimal("0.00")
+        if trace is not None:
+            trace.update(amount=str(amount), minimum_commission=self.config["minimum_commission"],
+                         commission_bps=self.config["commission_bps"], transfer_bps=p["transfer_bps"],
+                         stamp_sell_bps=p["stamp_sell_bps"], side=side, rounding="0.01 ROUND_HALF_UP",
+                         raw_commission=str(amount*number(self.config["commission_bps"])/10000),
+                         raw_transfer=str(amount*number(p["transfer_bps"])/10000),
+                         raw_stamp_tax=str(amount*number(p["stamp_sell_bps"])/10000) if side == "sell" else "0",
+                         components={"commission":str(commission), "transfer":str(transfer), "stamp_tax":str(stamp)},
+                         rules_version=self.rules["version"], rules_sha256=digest(self.rules))
         return {"commission": str(commission), "transfer": str(transfer), "stamp_tax": str(stamp),
                 "total": str(commission + transfer + stamp), "currency": "CNY", "rules_version": self.rules["version"]}
 
@@ -231,11 +242,14 @@ class CNMarket:
             raise ValueError("next settlement trading day is outside verified calendar")
         return after[0]
 
-    def validate_order(self, db, ticker, side, qty, limit, at):
+    def validate_order(self, db, ticker, side, qty, limit, at, *, trace=None):
         self.require_session(at)
         inst = self.instrument(db, ticker)
         require_available(inst, at)
         p, status = self.profile(inst), self.status(db, ticker, at)
+        if trace is not None:
+            trace.update(at=at, session="passed", profile=p, instrument_sha256=digest(inst),
+                         status=status, status_sha256=digest(status), qty=qty, limit_price=limit)
         if status["suspended"]:
             raise ValueError("security is suspended")
         if limit is None:
@@ -254,22 +268,29 @@ class CNMarket:
                 filled = sum(row["qty"] for row in db.execute("SELECT qty,time FROM fills WHERE symbol=? AND side='buy'", (ticker,)) if local_dt(row["time"]).date().isoformat() == status["day"])
                 from .risk import pending
                 outstanding = sum(o["qty"] for o in pending(db) if o["symbol"] == ticker and o["side"] == "buy")
+                if trace is not None:
+                    trace["risk_warning_quota"] = {"filled":filled, "outstanding":outstanding, "requested":qty, "maximum":500000}
                 if filled + outstanding + qty > 500000:
                     raise ValueError("risk-warning stock daily buy quota of 500000 exceeded")
         else:
             available = self.sellable(db, ticker, at)
             from .risk import pending
             reserved = sum(o["qty"] for o in pending(db) if o["symbol"] == ticker and o["side"] == "sell")
+            if trace is not None:
+                trace["sellable"] = {"settled_qty":available, "reserved_qty":reserved, "requested":qty}
             if qty > available - reserved:
                 raise ValueError("insufficient sellable quantity after T+1 and reservations")
             valid_regular = qty >= p["sell_min_qty"] and (qty - p["sell_min_qty"]) % p["sell_qty_step"] == 0
             if not valid_regular and not (qty == available and reserved == 0):
                 raise ValueError("odd-lot sale must dispose of the entire sellable balance")
 
-    def validate_fill(self, db, order, quote, price, at):
+    def validate_fill(self, db, order, quote, price, at, *, trace=None):
         day = self.require_session(at)
         require_available(self.instrument(db, order["symbol"]), at)
         status = self.status(db, order["symbol"], at)
+        if trace is not None:
+            trace.update(at=at, session_day=day, status=status, status_sha256=digest(status),
+                         qty=order["qty"], quote_asof=quote["asof"], quote_price=quote["price"], execution_price=str(price))
         if status["suspended"]:
             raise ValueError("security is suspended")
         if local_dt(quote["asof"]).date().isoformat() != day:
@@ -281,8 +302,12 @@ class CNMarket:
                 raise ValueError("quote/execution outside daily price limits")
             if (order["side"] == "buy" and observed >= hi) or (order["side"] == "sell" and observed <= lo):
                 raise ValueError("limit-locked direction cannot fill without order-book liquidity evidence")
-        if order["side"] == "sell" and order["qty"] > self.sellable(db, order["symbol"], at):
-            raise ValueError("T+1 sellable quantity insufficient at execution")
+        if order["side"] == "sell":
+            available = self.sellable(db, order["symbol"], at)
+            if trace is not None:
+                trace["sellable_qty"] = available
+            if order["qty"] > available:
+                raise ValueError("T+1 sellable quantity insufficient at execution")
 
     def record_fill(self, db, fill):
         day = self.day(fill["time"])

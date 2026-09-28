@@ -118,6 +118,25 @@ def parser():
     sub.add_parser("configure-risk", help="initialize immutable CN risk limits, not a model permission").add_argument("path")
     sub.add_parser("workflow-demo", help="complete synthetic CN episode; no live data or model API calls")
     sub.add_parser("workflow-example", help="write immutable synthetic episode and offline agent configs").add_argument("--out",required=True)
+    records = sub.add_parser("records", help="query/export automatic calculation and simulated execution records")
+    actions = records.add_subparsers(dest="records_action", required=True)
+    upgrade = actions.add_parser("upgrade", help="explicit additive migration of legacy account; verified backup first")
+    upgrade.add_argument("--backup", required=True)
+    actions.add_parser("import-run", help="verify and index complete historical cycle without reconstructing calculations").add_argument("--path", required=True)
+    view = actions.add_parser("show")
+    identifier = view.add_mutually_exclusive_group(required=True)
+    identifier.add_argument("--cycle-id")
+    identifier.add_argument("--fill-id")
+    for action in ("list", "export"):
+        cmd = actions.add_parser(action)
+        for field in ("model", "experiment", "cycle-id", "symbol", "since", "until", "status"):
+            cmd.add_argument("--"+field)
+        if action == "list":
+            cmd.add_argument("--limit", type=int, default=50)
+            cmd.add_argument("--offset", type=int, default=0)
+        else:
+            cmd.add_argument("--format", choices=["json", "csv"], default="json")
+            cmd.add_argument("--out", required=True)
     return p
 
 
@@ -196,6 +215,18 @@ def run(args):
     if command == "analyze-history":
         return market_report(read_capture(args.path), args.ticker, asof=args.asof)
     t = PaperTrader(args.db)
+    if command == "records":
+        from . import records
+        if args.records_action == "upgrade":
+            return records.upgrade(t, args.backup)
+        if args.records_action == "import-run":
+            return records.import_run(t, args.path)
+        if args.records_action == "show":
+            return records.show(t, cycle_id=args.cycle_id, fill_id=args.fill_id)
+        filters = {name:getattr(args,name) for name in ("model", "experiment", "cycle_id", "symbol", "since", "until", "status")}
+        if args.records_action == "list":
+            return records.listing(t, limit=args.limit, offset=args.offset, **filters)
+        return records.export(t, args.out, format=args.format, **filters)
     if command == "configure-risk":
         return t.configure_risk(config(args.path))
     if command == "observation":

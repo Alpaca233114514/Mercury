@@ -210,6 +210,15 @@ class OpenAIResponsesAgent(HTTPJSONAgent):
 def agent_from_config(config):
     if not isinstance(config, dict):
         raise ValueError("agent configuration must be an object")
+    if "provenance" in config:
+        provenance = config["provenance"]
+        allowed = {"model", "decision_maker", "session_source"}
+        if (not isinstance(provenance, dict) or set(provenance) != allowed or
+                any(not isinstance(v, str) or not v.strip() or len(v) > 256 for v in provenance.values())):
+            raise ValueError("provenance requires bounded model, decision_maker and session_source labels")
+        agent = agent_from_config({k:v for k,v in config.items() if k != "provenance"})
+        agent.identity["provenance"] = dict(provenance)
+        return agent
     if config.get("provider") == "offline":
         if set(config) - {"provider", "name", "strategy", "research"}:
             raise ValueError("unknown offline agent fields")

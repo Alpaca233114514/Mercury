@@ -77,6 +77,8 @@ class PaperTrader:
             with db:
                 db.executescript(SCHEMA.replace("order_id TEXT UNIQUE NOT NULL", "order_id TEXT NOT NULL"))
                 db.executescript(V2_SCHEMA)
+                from .records import initialize
+                initialize(db)
                 db.execute("INSERT INTO execution_config VALUES(1,?,?)", (canonical(execution_value), digest(execution_value)))
                 if cn_config is not None:
                     from .cn import CN_SCHEMA
@@ -121,17 +123,23 @@ class PaperTrader:
         from .risk import load
         return load(db, "execution_config")
 
-    def _estimated_fee(self, db, cn, order, amount):
+    def _estimated_fee(self, db, cn, order, amount, trace=None):
         previous = list(db.execute("SELECT notional,fee FROM fills WHERE order_id=?", (order.get("id", ""),)))
         total = sum((number(r[0]) for r in previous), Decimal(0))
         paid = sum((number(r[1]) for r in previous), Decimal(0))
         if cn:
-            cumulative = number(cn.charges(db, order["symbol"], total + amount, order["side"])["total"])
+            cumulative = number(cn.charges(db, order["symbol"], total + amount, order["side"], trace=trace)["total"])
         else:
             cumulative = money((total + amount) * number(self._account(db)["fee_bps"]) / 10000)
+        if trace is not None:
+            trace.update(previous_notional=str(total), previous_paid=str(paid), incremental_notional=str(amount),
+                         cumulative_fee=str(cumulative), incremental_fee=str(cumulative-paid),
+                         fee_bps=self._account(db)["fee_bps"], basis="order-cumulative")
         return cumulative - paid
 
     def _risk_record(self, db, payload, *, at=None):
+        from .records import code_identity
+        payload = dict(payload, code=code_identity())
         identifier = uuid.uuid4().hex
         now = at or self._now(self._account(db))
         db.execute("INSERT INTO risk_decisions VALUES(?,?,?)", (identifier, now, canonical(payload)))
@@ -164,7 +172,7 @@ class PaperTrader:
                 if old["payload"] != canonical(normalized) or old["observation"] != canonical(observation):
                     raise ValueError("intent_id reused with different intent/observation")
                 return json.loads(old["result"])
-            checks, orders, reasons = [], [], []
+            checks, orders, reasons, preflights = [], [], [], []
             try:
                 observation_binding(self, db, observation, now, max_quote_age_seconds=normalized["invalidation"]["max_quote_age_seconds"])
             except ValueError as exc:
@@ -190,7 +198,7 @@ class PaperTrader:
                     order = self._submit(db, ticker=item["symbol"], side=item["side"], qty=item["qty"],
                                          request_id=identifier + ":" + str(index), limit_price=item["limit_price"],
                                          reason=normalized["reason"], intent_id=identifier,
-                                         target_weight=item["target_weight"], checks=checks)
+                                         target_weight=item["target_weight"], checks=checks, preflights=preflights)
                     orders.append(order)
                 if not orders:
                     self._event(db, now, "hold", {"reason": normalized["reason"], "intent_id": identifier})
@@ -201,9 +209,16 @@ class PaperTrader:
                 db.execute("RELEASE intent_batch")
                 orders, status = [], "rejected"
                 reasons = [str(exc)]
-            rid = self._risk_record(db, {"phase": "intent", "intent_id": identifier, "status": status, "checks": checks, "errors": reasons})
+                for item in preflights:
+                    item["batch_rolled_back"] = True
+                    if item.get("phase") == "order-preflight" and item["status"] == "started":
+                        item.update(status="rejected", errors=[str(exc)])
+            rid = self._risk_record(db, {"phase": "intent", "intent_id": identifier, "status": status,
+                                        "checks": checks, "preflights":preflights, "errors": reasons})
             result = {"intent_id": identifier, "status": status, "orders": orders, "reasons": reasons, "risk_decision_id": rid}
             db.execute("INSERT INTO intents VALUES(?,?,?,?)", (identifier, canonical(normalized), canonical(observation), canonical(result)))
+            from .records import bind_intent
+            bind_intent(db, identifier)
             return result
 
     def _connect(self, readonly=False):
@@ -268,8 +283,13 @@ class PaperTrader:
         prior = db.execute("SELECT hash FROM events ORDER BY seq DESC LIMIT 1").fetchone()
         previous = prior[0] if prior else "0" * 64
         entry = dict(time=now, kind=kind, payload=payload, previous_hash=previous)
-        db.execute("INSERT INTO events(time,kind,payload,previous_hash,hash) VALUES(?,?,?,?,?)",
+        cursor = db.execute("INSERT INTO events(time,kind,payload,previous_hash,hash) VALUES(?,?,?,?,?)",
                    (now, kind, canonical(payload), previous, digest(entry)))
+        from .records import append
+        append(db, "event:"+str(cursor.lastrowid), "ledger_event", {"event_seq": cursor.lastrowid,
+               "event_kind": kind, "event_hash": digest(entry), "detail": payload,
+               "order_id": payload.get("order_id", payload.get("id") if kind == "submit" else payload.get("decision", {}).get("order_id")),
+               "intent_id": payload.get("intent_id", payload.get("decision", {}).get("intent_id"))}, time=now)
 
     def advance(self, at):
         at = timestamp(at)
@@ -357,7 +377,7 @@ class PaperTrader:
             return self._submit(db, ticker=ticker, side=side, qty=qty, request_id=request_id, limit_price=limit_price, reason=reason)
 
     def _submit(self, db, *, ticker, side, qty, request_id, limit_price=None, reason="",
-                intent_id=None, target_weight=None, checks=None):
+                intent_id=None, target_weight=None, checks=None, preflights=None):
         from .risk import v2, check
         ticker = symbol(ticker)
         if side not in {"buy", "sell"} or type(qty) is not int or not 1 <= qty <= 1000000000:
@@ -381,22 +401,29 @@ class PaperTrader:
             a = self._account(db)
             now = self._now(a)
             cn = self._policy(db)
+            preflight = {"phase":"order-preflight", "symbol":ticker, "side":side, "qty":qty,
+                         "limit_price":limit, "market":{}, "fee":{}, "status":"started", "errors":[]}
+            if preflights is not None:
+                preflights.append(preflight)
             if cn is not None:
                 cn.expire_orders(db, now, self._event)
-                cn.validate_order(db, ticker, side, qty, limit, now)
+                cn.validate_order(db, ticker, side, qty, limit, now, trace=preflight["market"])
             q = self._quote(db, ticker, now, a)
             reserved = Decimal(0)
             if side == "buy":
                 p = number(limit) if limit else money(number(q["price"]) * (1 + number(a["slippage_bps"]) / 10000))
                 cost = money(p * qty)
-                reserved = cost + (number(cn.charges(db, ticker, cost, side)["total"]) if cn else money(cost * number(a["fee_bps"]) / 10000))
+                reserved = cost + (number(cn.charges(db, ticker, cost, side, trace=preflight["fee"])["total"]) if cn else money(cost * number(a["fee_bps"]) / 10000))
                 others = sum((number(r[0]) for r in db.execute("SELECT reserved_cash FROM orders WHERE status='open'")), Decimal(0))
+                preflight["cash"] = {"cash":a["cash"], "other_reservations":str(others), "requested_reservation":str(reserved),
+                                     "reservation_price":str(p), "notional":str(cost), "available":str(number(a["cash"])-others)}
                 if reserved > number(a["cash"]) - others:
                     raise ValueError("insufficient available cash")
             else:
                 pos = db.execute("SELECT qty FROM positions WHERE symbol=?", (ticker,)).fetchone()
                 from .risk import pending
                 used = sum(o["qty"] for o in pending(db) if o["symbol"] == ticker and o["side"] == "sell")
+                preflight["position"] = {"qty":pos[0] if pos else 0, "reserved_qty":used, "requested_qty":qty}
                 if qty > (pos[0] if pos else 0) - used:
                     raise ValueError("insufficient available position; short selling disabled")
             order = dict(id=uuid.uuid4().hex, request_id=request_id, symbol=ticker, side=side, qty=qty,
@@ -419,6 +446,15 @@ class PaperTrader:
             if intent_id is not None:
                 db.execute("INSERT INTO order_intents VALUES(?,?,?)", (order["id"], intent_id, str(target_weight)))
             self._event(db, now, "submit", order)
+            from .records import append
+            append(db, "submit:"+order["id"], "order_calculation", {
+                "order_id": order["id"], "intent_id": intent_id, "quote_id": q["id"],
+                "cash": a["cash"], "reserved_cash": str(reserved),
+                "cash_available_before": str(number(a["cash"])-others) if side == "buy" else None,
+                "position_qty": pos[0] if side == "sell" and pos else None,
+                "reserved_sell_qty": used if side == "sell" else None,
+                "preflight":dict(preflight,status="passed"), "risk": decision, "market_validation": "passed" if cn else "not_applicable"}, time=now)
+            preflight["status"] = "passed"
             return order
 
     def cancel(self, order_id):
@@ -447,6 +483,7 @@ class PaperTrader:
     def match(self):
         from .risk import v2, remaining, check, load
         results = []
+        attempts = {}
         with self._tx() as db:
             a = self._account(db)
             now = self._now(a)
@@ -459,6 +496,9 @@ class PaperTrader:
                 cn.expire_orders(db, now, self._event)
             for row in db.execute("SELECT * FROM orders WHERE status='open' ORDER BY rowid").fetchall():
                 o = dict(row)
+                attempt = {"order_id":o["id"], "quote_status":"not_executed", "price_status":"not_executed",
+                           "fee_status":"not_executed", "market":{}, "execution_config":execution}
+                attempts[o["id"]] = attempt
                 left_before = remaining(db, o)
                 protected = load(db, "risk_config")
                 stored_intent = None
@@ -477,6 +517,9 @@ class PaperTrader:
                 except ValueError as exc:
                     results.append({"order_id": o["id"], "status": "open", "reason": str(exc)})
                     continue
+                attempt.update(quote_status="available", quote_id=q["id"], quote_asof=q["asof"],
+                               collected_at=q["received_at"], quote_age_seconds=str(age_seconds(now,q["asof"])),
+                               order_age_seconds=str(age_seconds(now,o["created_at"])), latency_seconds=latency)
                 if stored_intent and age_seconds(now, q["asof"]) > stored_intent["invalidation"]["max_quote_age_seconds"]:
                     reason = "quote too old for intent"
                     self._risk_record(db, {"phase": "fill", "order_id": o["id"], "errors": [reason]}, at=now)
@@ -500,15 +543,22 @@ class PaperTrader:
                     consumed = db.execute("SELECT consumed_qty FROM quote_capacity WHERE symbol=? AND asof=?", (o["symbol"], q["asof"])).fetchone()
                     capacity = execution["max_fill_qty"] - (consumed[0] if consumed else 0)
                     filled_qty = min(left_before, capacity)
+                    attempt.update(capacity_remaining_before=capacity, proposed_qty=filled_qty)
                     if filled_qty <= 0:
                         results.append({"order_id": o["id"], "status": "open", "reason": "parameterized quote capacity exhausted"})
                         continue
                 direction = 1 if o["side"] == "buy" else -1
                 effective_slip = number(a["slippage_bps"]) + spread
-                price = cn.price(db, o["symbol"], q["price"], effective_slip, o["side"]) if cn else money(number(q["price"]) * (1 + direction * effective_slip / 10000))
+                price_trace = {}
+                raw_price = number(q["price"]) * (1 + direction * effective_slip / 10000)
+                price = cn.price(db, o["symbol"], q["price"], effective_slip, o["side"], trace=price_trace) if cn else money(raw_price)
+                price_trace.update(base_price=q["price"], raw_price=str(raw_price), rounded_price=str(price),
+                                   slippage_bps=a["slippage_bps"], half_spread_bps=str(spread),
+                                   effective_slip_bps=str(effective_slip), direction=direction)
+                attempt.update(price_status="executed", price=price_trace, limit_price=o["limit_price"])
                 if cn:
                     try:
-                        cn.validate_fill(db, dict(o, qty=filled_qty), q, price, now)
+                        cn.validate_fill(db, dict(o, qty=filled_qty), q, price, now, trace=attempt["market"])
                     except ValueError as exc:
                         results.append({"order_id": o["id"], "status": "open", "reason": str(exc)})
                         continue
@@ -518,7 +568,9 @@ class PaperTrader:
                     results.append({"order_id": o["id"], "status": "open", "reason": "limit not reached after slippage"})
                     continue
                 notional = money(price * filled_qty)
-                fee = self._estimated_fee(db, cn, o, notional) if modern else (number(cn.charges(db, o["symbol"], notional, o["side"])["total"]) if cn else money(notional * number(a["fee_bps"]) / 10000))
+                fee_trace = {}
+                fee = self._estimated_fee(db, cn, o, notional, trace=fee_trace) if modern else (number(cn.charges(db, o["symbol"], notional, o["side"], trace=fee_trace)["total"]) if cn else money(notional * number(a["fee_bps"]) / 10000))
+                attempt.update(fee_status="executed", fee=fee_trace, notional=str(notional))
                 protected = load(db, "risk_config")
                 if protected:
                     link = db.execute("SELECT * FROM order_intents WHERE order_id=?", (o["id"],)).fetchone()
@@ -547,6 +599,7 @@ class PaperTrader:
                 cash = number(self._account(db)["cash"])
                 pos = db.execute("SELECT * FROM positions WHERE symbol=?", (o["symbol"],)).fetchone()
                 qty, cost = (pos["qty"], number(pos["cost"])) if pos else (0, Decimal(0))
+                before = {"cash": str(cash), "qty": qty, "cost": str(cost)}
                 pnl = Decimal(0)
                 if o["side"] == "buy":
                     other = sum((number(r[0]) for r in db.execute("SELECT reserved_cash FROM orders WHERE status='open' AND id<>?", (o["id"],))), Decimal(0))
@@ -555,6 +608,7 @@ class PaperTrader:
                         residual_amount = money(number(o["limit_price"] or price) * (left_before-filled_qty))
                         remaining_cost = residual_amount + self._estimated_fee(db, cn, o, notional+residual_amount) - fee
                     if notional + fee + remaining_cost > cash - other:
+                        attempt["cash_check"] = {"requested":str(notional+fee+remaining_cost), "available":str(cash-other)}
                         db.execute("UPDATE orders SET status='rejected',reserved_cash='0' WHERE id=?", (o["id"],))
                         self._event(db, now, "reject", {"order_id": o["id"], "reason": "price moved beyond available cash"})
                         results.append({"order_id": o["id"], "status": "rejected"})
@@ -567,6 +621,7 @@ class PaperTrader:
                         raise ValueError("ledger invariant violated: oversell")
                     other = sum((number(r[0]) for r in db.execute("SELECT reserved_cash FROM orders WHERE status='open' AND id<>?", (o["id"],))), Decimal(0))
                     if cash + notional - fee < other:
+                        attempt["cash_check"] = {"after_sale_cash":str(cash+notional-fee), "reserved":str(other)}
                         db.execute("UPDATE orders SET status='rejected',reserved_cash='0' WHERE id=?", (o["id"],))
                         self._event(db, now, "reject", {"order_id": o["id"], "reason": "sale proceeds and available cash cannot cover fees"})
                         results.append({"order_id": o["id"], "status": "rejected", "reason": "insufficient cash to cover sale fees"})
@@ -596,6 +651,22 @@ class PaperTrader:
                     if residual_reserve > cash - other:
                         raise ValueError("partial fill violates remaining reservation invariant")
                     db.execute("UPDATE orders SET reserved_cash=? WHERE id=?", (str(residual_reserve), o["id"]))
+                from .records import append, code_identity
+                charge_row = db.execute("SELECT payload FROM fill_charges WHERE fill_id=?", (fill["id"],)).fetchone() if cn else None
+                append(db, "fill:"+fill["id"], "fill_calculation", {
+                    "fill_id": fill["id"], "order_id": o["id"], "quote_id": q["id"],
+                    "quote_asof": q["asof"], "collected_at": q["received_at"], "source_hash": q["evidence_hash"],
+                    "price": price_trace, "notional_unrounded": str(price*filled_qty), "notional": str(notional),
+                    "fee": fee_trace, "charges": json.loads(charge_row[0]) if charge_row else None,
+                    "execution": execution, "execution_sha256": digest(execution), "code": code_identity(),
+                    "market_checks":attempt["market"],
+                    "latency_age_seconds": str(age_seconds(now, o["created_at"])),
+                    "capacity_remaining_before": capacity if execution and execution["max_fill_qty"] is not None else None,
+                    "remaining_before": left_before, "filled_qty": filled_qty, "remaining_after": left_after,
+                    "filled_cumulative": o["qty"]-left_after, "before": before,
+                    "after": {"cash": str(cash), "qty": qty, "cost": str(cost)},
+                    "cost_basis_released": str(basis) if o["side"] == "sell" else None,
+                    "realized_pnl": str(pnl), "valuation": self.portfolio(_db=db, _at=now)}, time=now)
                 self._event(db, now, "fill", fill)
                 if modern and load(db, "risk_config") is not None:
                     valuation = self.portfolio(_db=db, _at=now)
@@ -603,6 +674,10 @@ class PaperTrader:
                         db.execute("INSERT INTO risk_state VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET time=excluded.time,equity=excluded.equity", (now, valuation["equity"]))
                         self._event(db, now, "risk_valuation", {"time": now, "equity": valuation["equity"]})
                 results.append(fill)
+            from .records import append
+            for item in results:
+                if "status" in item:
+                    append(db, uuid.uuid4().hex, "execution_attempt", dict(item, calculation=attempts[item["order_id"]]), time=now)
         return results
 
     def portfolio(self, *, record=False, _db=None, _at=None):
